@@ -7,13 +7,16 @@ const router = express.Router();
 
 // Public routes
 router.get('/', productController.getAllProducts);
+
+// Protected user's products route (must be before /:id to avoid conflict)
+router.get('/my-products', protect, productController.getMyProducts);
+
+// Public route with ID parameter (must be after specific routes)
 router.get('/:id', productController.getProduct);
 
 // Protected routes
 router.use(protect);
 
-// Get user's own products
-router.get('/my-products', productController.getMyProducts);
 
 // Create product
 router.post('/', validateProduct, productController.createProduct);

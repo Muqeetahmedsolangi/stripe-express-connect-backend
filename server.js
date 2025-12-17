@@ -12,6 +12,7 @@ const paymentRoutes = require('./routes/payments');
 const stripeConnectRoutes = require('./routes/stripeConnect');
 const payoutsRoutes = require('./routes/payouts');
 const webhookRoutes = require('./routes/webhook');
+const adminRoutes = require('./routes/admin');
 
 // Import middleware
 const errorHandler = require('./middleware/errorHandler');
@@ -67,6 +68,7 @@ app.use('/api/products', productRoutes);
 app.use('/api/payments', paymentRoutes);
 app.use('/api/connect', stripeConnectRoutes);
 app.use('/api/payouts', payoutsRoutes);
+app.use('/api/admin', adminRoutes);
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {

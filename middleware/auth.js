@@ -43,6 +43,15 @@ const protect = async (req, res, next) => {
   }
 };
 
+// Restrict routes to admin only
+const restrictToAdmin = (req, res, next) => {
+  if (req.user.role !== 'admin') {
+    return next(new AppError('Access denied. Admin privileges required.', 403));
+  }
+  next();
+};
+
 module.exports = {
   protect,
+  restrictToAdmin,
 };

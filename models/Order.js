@@ -66,6 +66,34 @@ module.exports = (sequelize, DataTypes) => {
       type: DataTypes.ENUM('pending', 'confirmed', 'canceled'),
       defaultValue: 'pending',
     },
+    paymentHoldDays: {
+      type: DataTypes.INTEGER,
+      allowNull: true,
+      defaultValue: 5,
+      comment: 'Number of days to hold payment before release',
+    },
+    paymentReleaseDate: {
+      type: DataTypes.DATE,
+      allowNull: true,
+      comment: 'Date when payment should be released to sellers',
+    },
+    paymentHeld: {
+      type: DataTypes.BOOLEAN,
+      allowNull: false,
+      defaultValue: true,
+      comment: 'Whether payment is currently held in platform account',
+    },
+    paymentReleased: {
+      type: DataTypes.BOOLEAN,
+      allowNull: false,
+      defaultValue: false,
+      comment: 'Whether payment has been released to sellers',
+    },
+    paymentReleasedAt: {
+      type: DataTypes.DATE,
+      allowNull: true,
+      comment: 'Timestamp when payment was released',
+    },
   }, {
     timestamps: true,
     indexes: [
@@ -83,6 +111,15 @@ module.exports = (sequelize, DataTypes) => {
       },
       {
         fields: ['createdAt'],
+      },
+      {
+        fields: ['paymentReleaseDate'],
+      },
+      {
+        fields: ['paymentHeld'],
+      },
+      {
+        fields: ['paymentReleased'],
       },
     ],
     hooks: {

@@ -29,4 +29,7 @@ router.get('/history', paymentController.getPaymentHistory);
 // Get single order
 router.get('/orders/:id', paymentController.getOrder);
 
+// Release held payments (can be called manually or by cron job)
+router.post('/release-held-payments', paymentController.releaseHeldPayments);
+
 module.exports = router;
