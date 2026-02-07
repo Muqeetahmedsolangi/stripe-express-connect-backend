@@ -264,8 +264,26 @@ const getStripePayouts = catchAsync(async (req, res, next) => {
       return next(new AppError('No Stripe Connect account found', 404));
     }
 
-    if (!user.payoutsEnabled) {
-      return next(new AppError('Payouts not enabled for your account', 403));
+    // Check Stripe account status directly and sync with database
+    try {
+      const account = await stripe.accounts.retrieve(user.stripeAccountId);
+      
+      // Sync payouts enabled status with database
+      if (user.payoutsEnabled !== account.payouts_enabled) {
+        await user.update({ payoutsEnabled: account.payouts_enabled });
+        user.payoutsEnabled = account.payouts_enabled;
+      }
+
+      // Check if payouts are actually enabled in Stripe
+      if (!account.payouts_enabled) {
+        return next(new AppError('Payouts not enabled for your Stripe account. Please complete your account setup.', 403));
+      }
+    } catch (stripeError) {
+      console.error('Error checking Stripe account:', stripeError);
+      // Fallback to database value if Stripe check fails
+      if (!user.payoutsEnabled) {
+        return next(new AppError('Payouts not enabled for your account', 403));
+      }
     }
 
     // Fetch payouts from Stripe using the connected account

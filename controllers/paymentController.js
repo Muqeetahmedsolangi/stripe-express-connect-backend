@@ -1,6 +1,7 @@
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const { Order, Product, OrderItem, User, Payout } = require('../models');
 const { AppError, catchAsync } = require('../utils/errors');
+const { calculateNextPayoutDate, isPayoutDateReached, updateNextPayoutDate } = require('../utils/payoutSchedule');
 
 // Create Stripe payment intent
 const createPaymentIntent = catchAsync(async (req, res, next) => {
@@ -78,13 +79,44 @@ const createPaymentIntent = catchAsync(async (req, res, next) => {
     const random = Math.random().toString(36).substring(2, 8).toUpperCase();
     const orderNumber = `ORD-${timestamp.slice(-8)}-${random}`;
 
-    // Calculate payment hold period (default 5 days, min 1, max 30)
+    // Determine payment release date based on seller's payout schedule
+    // Group items by seller to get their payout schedules
+    const sellerIds = [...new Set(orderItems.map(item => item.product.sellerId))];
+    const sellers = await User.findAll({
+      where: { id: sellerIds },
+      attributes: ['id', 'payoutScheduleType', 'payoutDay', 'payoutDate', 'nextPayoutDate']
+    });
+
+    // Use the earliest payout date among all sellers, or default hold period
+    let releaseDate = null;
     let holdDays = parseInt(process.env.PAYMENT_HOLD_DAYS) || 5;
-    // Ensure hold days is within valid range (1-30)
-    if (holdDays < 1) holdDays = 1;
-    if (holdDays > 30) holdDays = 30;
-    const releaseDate = new Date();
-    releaseDate.setDate(releaseDate.getDate() + holdDays);
+    
+    for (const seller of sellers) {
+      const sellerPayoutDate = calculateNextPayoutDate(seller);
+      
+      if (sellerPayoutDate) {
+        if (!releaseDate || sellerPayoutDate < releaseDate) {
+          releaseDate = sellerPayoutDate;
+        }
+      }
+    }
+
+    // If no seller has payout schedule, use default hold period
+    if (!releaseDate) {
+      if (holdDays < 1) holdDays = 1;
+      if (holdDays > 30) holdDays = 30;
+      releaseDate = new Date();
+      releaseDate.setDate(releaseDate.getDate() + holdDays);
+    } else {
+      // Calculate hold days based on release date
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      const releaseDateOnly = new Date(releaseDate);
+      releaseDateOnly.setHours(0, 0, 0, 0);
+      const diffTime = releaseDateOnly - today;
+      holdDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+      if (holdDays < 1) holdDays = 1;
+    }
 
     // Create pending order with payment hold information
     const order = await Order.create({
@@ -468,13 +500,13 @@ const createPendingPayouts = async (order) => {
       if (!existingPayout) {
         // Create payout record with pending status (will be processed on release date)
         await Payout.create({
-          sellerId: sellerId,
-          orderId: order.id,
-          totalAmount: Math.round(sellerTotal * 100), // Store in cents
-          platformFee: Math.round(platformFee * 100),
-          stripeFee: Math.round(stripeFee * 100),
-          taxes: Math.round(taxes * 100),
-          sellerEarnings: Math.round(sellerEarnings * 100),
+        sellerId: sellerId,
+        orderId: order.id,
+        totalAmount: Math.round(sellerTotal * 100), // Store in cents
+        platformFee: Math.round(platformFee * 100),
+        stripeFee: Math.round(stripeFee * 100),
+        taxes: Math.round(taxes * 100),
+        sellerEarnings: Math.round(sellerEarnings * 100),
           status: 'pending' // Will be processed when payment is released
         });
 
@@ -512,10 +544,10 @@ const processSellerPayouts = async (order) => {
     }
 
     // Get all pending payouts for this order
-    const payouts = await Payout.findAll({
+    let payouts = await Payout.findAll({
       where: {
         orderId: order.id,
-        status: 'pending'
+        status: 'pending' 
       },
       include: [{
         model: User,
@@ -523,9 +555,29 @@ const processSellerPayouts = async (order) => {
       }]
     });
 
+    // If no pending payouts exist, create them first (for old orders that don't have payout records)
     if (payouts.length === 0) {
-      console.log(`⚠️ No pending payouts found for order ${order.orderNumber}`);
-      return;
+      console.log(`⚠️ No pending payouts found for order ${order.orderNumber}. Creating payout records...`);
+      await createPendingPayouts(orderWithItems);
+      
+      // Reload payouts after creation
+      payouts = await Payout.findAll({
+        where: {
+          orderId: order.id,
+          status: 'pending' 
+        },
+        include: [{
+          model: User,
+          as: 'seller'
+        }]
+      });
+      
+      if (payouts.length === 0) {
+        console.error(`❌ Failed to create payout records for order ${order.orderNumber}`);
+        return;
+      }
+      
+      console.log(`✅ Created ${payouts.length} payout record(s) for order ${order.orderNumber}`);
     }
 
     // Process each payout
@@ -560,6 +612,14 @@ const processSellerPayouts = async (order) => {
           payout.transferDate = new Date();
           await payout.save();
 
+          // Update seller's next payout date if they have a recurring schedule
+          if (seller.payoutScheduleType && seller.payoutScheduleType !== 'custom') {
+            const nextDate = await updateNextPayoutDate(seller);
+            if (nextDate) {
+              await seller.update({ nextPayoutDate: nextDate });
+            }
+          }
+
           console.log(`✅ Payout released for seller ${seller.id}: $${sellerEarnings.toFixed(2)} (Transfer ID: ${transfer.id})`);
         } catch (transferError) {
           console.error(`❌ Transfer failed for seller ${seller.id}:`, transferError);
@@ -587,23 +647,28 @@ const processSellerPayouts = async (order) => {
   }
 };
 
-// Release held payments to sellers (called by scheduled job)
+// Release held payments to sellers (called by scheduled job or admin)
 const releaseHeldPayments = catchAsync(async (req, res, next) => {
   try {
     const now = new Date();
+    now.setHours(0, 0, 0, 0);
     
     // Find all orders that are:
     // 1. Payment succeeded
     // 2. Payment is held (not yet released)
-    // 3. Release date has passed
+    // 3. Release date has passed OR seller's payout date has arrived
     const ordersToRelease = await Order.findAll({
       where: {
         paymentStatus: 'succeeded',
         paymentHeld: true,
         paymentReleased: false,
-        paymentReleaseDate: {
-          [require('sequelize').Op.lte]: now
-        }
+        [require('sequelize').Op.or]: [
+          {
+            paymentReleaseDate: {
+              [require('sequelize').Op.lte]: now
+            }
+          }
+        ]
       },
       include: [{
         model: OrderItem,
@@ -619,7 +684,39 @@ const releaseHeldPayments = catchAsync(async (req, res, next) => {
       }]
     });
 
-    if (ordersToRelease.length === 0) {
+    // Filter orders where seller's payout date has arrived
+    const filteredOrders = [];
+    for (const order of ordersToRelease) {
+      let shouldRelease = false;
+      
+      // Check if order's release date has passed
+      if (order.paymentReleaseDate) {
+        const releaseDate = new Date(order.paymentReleaseDate);
+        releaseDate.setHours(0, 0, 0, 0);
+        if (releaseDate <= now) {
+          shouldRelease = true;
+        }
+      }
+      
+      // Also check if any seller's payout date has arrived
+      if (!shouldRelease) {
+        for (const item of order.orderItems) {
+          if (item.product && item.product.seller) {
+            const seller = item.product.seller;
+            if (isPayoutDateReached(seller)) {
+              shouldRelease = true;
+              break;
+            }
+          }
+        }
+      }
+      
+      if (shouldRelease) {
+        filteredOrders.push(order);
+      }
+    }
+
+    if (filteredOrders.length === 0) {
       const message = 'No payments ready for release';
       if (res) {
         return res.status(200).json({
@@ -632,13 +729,13 @@ const releaseHeldPayments = catchAsync(async (req, res, next) => {
       return { ordersReleased: 0 };
     }
 
-    console.log(`🔄 Found ${ordersToRelease.length} order(s) ready for payment release`);
+    console.log(`🔄 Found ${filteredOrders.length} order(s) ready for payment release`);
 
     let successCount = 0;
     let failureCount = 0;
 
     // Process each order
-    for (const order of ordersToRelease) {
+    for (const order of filteredOrders) {
       try {
         console.log(`📦 Processing release for order #${order.orderNumber} (Release date: ${order.paymentReleaseDate})`);
         await processSellerPayouts(order);

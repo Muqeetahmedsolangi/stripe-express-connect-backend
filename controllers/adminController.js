@@ -12,6 +12,7 @@ const getAllSellers = catchAsync(async (req, res, next) => {
     attributes: [
       'id', 'email', 'firstName', 'lastName', 'phoneNumber',
       'stripeAccountId', 'onboardingCompleted', 'chargesEnabled', 'payoutsEnabled',
+      'payoutScheduleType', 'payoutDay', 'payoutDate', 'nextPayoutDate',
       'createdAt', 'lastLogin'
     ],
     order: [['createdAt', 'DESC']]
@@ -87,7 +88,13 @@ const getAllSellers = catchAsync(async (req, res, next) => {
           totalRevenue: Math.round(totalRevenue * 100) / 100,
           pendingPayouts
         },
-        stripeAccount: stripeAccountDetails
+        stripeAccount: stripeAccountDetails,
+        payoutSchedule: {
+          type: seller.payoutScheduleType,
+          day: seller.payoutDay,
+          date: seller.payoutDate,
+          nextPayoutDate: seller.nextPayoutDate
+        }
       };
     })
   );
@@ -109,6 +116,7 @@ const getSellerDetails = catchAsync(async (req, res, next) => {
     attributes: [
       'id', 'email', 'firstName', 'lastName', 'phoneNumber',
       'stripeAccountId', 'onboardingCompleted', 'chargesEnabled', 'payoutsEnabled',
+      'payoutScheduleType', 'payoutDay', 'payoutDate', 'nextPayoutDate',
       'createdAt', 'lastLogin', 'role'
     ]
   });
@@ -395,12 +403,102 @@ const releaseReadyPayments = catchAsync(async (req, res, next) => {
   }
 });
 
+// Update seller payout schedule
+const updateSellerPayoutSchedule = catchAsync(async (req, res, next) => {
+  const { sellerId } = req.params;
+  const { scheduleType, payoutDay, payoutDate } = req.body;
+
+  const seller = await User.findByPk(sellerId);
+
+  if (!seller || seller.role !== 'seller') {
+    return next(new AppError('Seller not found', 404));
+  }
+
+  // Validate schedule type
+  const validScheduleTypes = ['daily', 'weekly', 'monthly', 'custom'];
+  if (scheduleType && !validScheduleTypes.includes(scheduleType)) {
+    return next(new AppError('Invalid schedule type. Must be: daily, weekly, monthly, or custom', 400));
+  }
+
+  // Validate payout day based on schedule type
+  if (scheduleType === 'weekly' && payoutDay !== null && payoutDay !== undefined) {
+    if (payoutDay < 0 || payoutDay > 6) {
+      return next(new AppError('Payout day for weekly schedule must be 0-6 (0=Sunday, 6=Saturday)', 400));
+    }
+  }
+
+  if (scheduleType === 'monthly' && payoutDay !== null && payoutDay !== undefined) {
+    if (payoutDay < 1 || payoutDay > 31) {
+      return next(new AppError('Payout day for monthly schedule must be 1-31', 400));
+    }
+  }
+
+  // Validate custom date
+  if (scheduleType === 'custom' && payoutDate) {
+    const customDate = new Date(payoutDate);
+    if (isNaN(customDate.getTime())) {
+      return next(new AppError('Invalid payout date', 400));
+    }
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    customDate.setHours(0, 0, 0, 0);
+    if (customDate < today) {
+      return next(new AppError('Custom payout date must be in the future', 400));
+    }
+  }
+
+  // Update seller payout schedule
+  const updateData = {};
+  if (scheduleType !== undefined) {
+    updateData.payoutScheduleType = scheduleType || null;
+  }
+  if (payoutDay !== undefined) {
+    updateData.payoutDay = payoutDay !== null && payoutDay !== '' ? parseInt(payoutDay) : null;
+  }
+  if (payoutDate !== undefined) {
+    updateData.payoutDate = payoutDate ? new Date(payoutDate) : null;
+  }
+
+  // Calculate next payout date
+  if (scheduleType) {
+    const { calculateNextPayoutDate } = require('../utils/payoutSchedule');
+    const tempSeller = { ...seller.toJSON(), ...updateData };
+    const nextDate = calculateNextPayoutDate(tempSeller);
+    updateData.nextPayoutDate = nextDate;
+  } else if (scheduleType === null || scheduleType === '') {
+    // Clear payout schedule
+    updateData.payoutScheduleType = null;
+    updateData.payoutDay = null;
+    updateData.payoutDate = null;
+    updateData.nextPayoutDate = null;
+  }
+
+  await seller.update(updateData);
+
+  // Reload seller to get updated data
+  const updatedSeller = await User.findByPk(sellerId, {
+    attributes: [
+      'id', 'email', 'firstName', 'lastName',
+      'payoutScheduleType', 'payoutDay', 'payoutDate', 'nextPayoutDate'
+    ]
+  });
+
+  res.status(200).json({
+    status: 'success',
+    message: 'Seller payout schedule updated successfully',
+    data: {
+      seller: updatedSeller
+    }
+  });
+});
+
 module.exports = {
   getAllSellers,
   getSellerDetails,
   getAllOrders,
   updatePaymentReleaseDate,
   releasePayment,
-  releaseReadyPayments
+  releaseReadyPayments,
+  updateSellerPayoutSchedule
 };
 

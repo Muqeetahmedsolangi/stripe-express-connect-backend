@@ -73,6 +73,30 @@ module.exports = (sequelize, DataTypes) => {
       type: DataTypes.DATE,
       allowNull: true,
     },
+    payoutScheduleType: {
+      type: DataTypes.ENUM('daily', 'weekly', 'monthly', 'custom'),
+      allowNull: true,
+      defaultValue: null,
+      comment: 'Type of payout schedule: daily, weekly, monthly, or custom date',
+    },
+    payoutDay: {
+      type: DataTypes.INTEGER,
+      allowNull: true,
+      defaultValue: null,
+      comment: 'Day of month (1-31) for monthly payouts, or day of week (0-6) for weekly',
+    },
+    payoutDate: {
+      type: DataTypes.DATE,
+      allowNull: true,
+      defaultValue: null,
+      comment: 'Specific date for custom payout schedule',
+    },
+    nextPayoutDate: {
+      type: DataTypes.DATE,
+      allowNull: true,
+      defaultValue: null,
+      comment: 'Next scheduled payout date for this seller',
+    },
   }, {
     timestamps: true,
     indexes: [
@@ -84,6 +108,12 @@ module.exports = (sequelize, DataTypes) => {
       },
       {
         fields: ['stripeAccountId'],
+      },
+      {
+        fields: ['payoutScheduleType'],
+      },
+      {
+        fields: ['nextPayoutDate'],
       },
     ],
     hooks: {

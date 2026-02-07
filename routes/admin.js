@@ -26,5 +26,8 @@ router.post('/orders/:orderId/release', adminController.releasePayment);
 // Release all ready payments
 router.post('/payments/release-ready', adminController.releaseReadyPayments);
 
+// Update seller payout schedule
+router.patch('/sellers/:sellerId/payout-schedule', adminController.updateSellerPayoutSchedule);
+
 module.exports = router;
 
